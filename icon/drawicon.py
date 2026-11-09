@@ -1,72 +1,90 @@
-"""Иконка Severance Studio: фирменный градиент Severance, диагональный
-разрез (как на оригинальном значке), внутри разреза — клавиши пианино.
+"""Значок Severance Studio — в фирменной ДНК Severance: тот же тёмный
+квадрат и градиентный круг, расколотый надвое. В разрезе — три ноты
+пиано-ролла: Studio добавляет к разбору ноты и вокал.
 
 Запуск (Qt-плагины находятся в venv оригинального Severance):
     /Users/tonix/Developer/severance/.venv/bin/python drawicon.py
-Результат: AppIcon-1024.png, iconset, AppIcon.icns (если есть iconutil).
+Результат: AppIcon-1024.png, AppIcon.iconset, AppIcon.icns.
 """
 from __future__ import annotations
 
+import math
 import subprocess
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import (QColor, QGuiApplication, QImage, QLinearGradient,
-                           QPainter, QPainterPath)
+from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtGui import (QBrush, QColor, QGuiApplication, QImage,
+                           QLinearGradient, QPainter, QPainterPath, QPolygonF)
 
 OUT = Path(__file__).parent
+BACK = QColor("#121216")
 STOPS = ((0.0, "#ffb15c"), (0.34, "#ff5a7a"), (0.68, "#8a5cff"), (1.0, "#3cc8f0"))
-DARK = "#101013"
+TILT = math.radians(18)
+NOTE = QColor("#ededf1")
 
 
-def render(size: int) -> QImage:
-    img = QImage(size, size, QImage.Format.Format_ARGB32)
+def gradient(x0, y0, x1, y1):
+    g = QLinearGradient(x0, y0, x1, y1)
+    for at, c in STOPS:
+        g.setColorAt(at, QColor(c))
+    return g
+
+
+def halves(cx, cy, r, gap):
+    """Две половины круга, раздвинутые поперёк и сдвинутые вдоль разреза."""
+    dx, dy = math.sin(TILT), -math.cos(TILT)
+    nx, ny = math.cos(TILT), math.sin(TILT)
+    big = r * 3
+    out = []
+    for side in (-1, 1):
+        plane = QPolygonF([
+            QPointF(cx + dx * big, cy + dy * big),
+            QPointF(cx + dx * big + nx * big * side, cy + dy * big + ny * big * side),
+            QPointF(cx - dx * big + nx * big * side, cy - dy * big + ny * big * side),
+            QPointF(cx - dx * big, cy - dy * big),
+        ])
+        cut = QPainterPath()
+        cut.addPolygon(plane)
+        disc = QPainterPath()
+        disc.addEllipse(QPointF(cx, cy), r, r)
+        half = disc.intersected(cut)
+        shift = QPointF(nx * gap * side - dx * gap * 0.55 * side,
+                        ny * gap * side - dy * gap * 0.55 * side)
+        out.append(half.translated(shift))
+    return out
+
+
+def render(S: int) -> QImage:
+    QGuiApplication.instance() or QGuiApplication([])
+    img = QImage(S, S, QImage.Format.Format_ARGB32)
     img.fill(Qt.GlobalColor.transparent)
     p = QPainter(img)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    s = size
+    p.fillRect(QRectF(0, 0, S, S), BACK)
 
-    # Скруглённый квадрат с фирменным градиентом.
-    grad = QLinearGradient(0, 0, s, s)
-    for pos, col in STOPS:
-        grad.setColorAt(pos, QColor(col))
-    path = QPainterPath()
-    path.addRoundedRect(QRectF(0, 0, s, s), s * 0.225, s * 0.225)
-    p.setClipPath(path)
-    p.fillRect(QRectF(0, 0, s, s), grad)
+    cx = cy = S / 2
+    r = S * 0.30
+    gap = S * 0.075          # пошире, чем у оригинала: в разрезе ноты
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QBrush(gradient(cx - r, cy - r, cx + r, cy + r)))
+    for half in halves(cx, cy, r, gap):
+        p.drawPath(half)
 
-    # Диагональный разрез под 18°.
+    # Ноты пиано-ролла в разрезе: три скруглённых бара разной длины,
+    # параллельных разрезу. Толщина и радиусы — от S, читаются на 64 px.
     p.save()
-    p.translate(s / 2, s / 2)
+    disc = QPainterPath()
+    disc.addEllipse(QPointF(cx, cy), r, r)
+    p.setClipPath(disc)
+    p.translate(cx, cy)
     p.rotate(18)
-    cut = s * 0.15
-    p.fillRect(QRectF(-cut / 2, -s, cut, 2 * s), QColor(DARK))
-
-    # Клавиши внутри разреза — крупные блоки, чтобы читались даже
-    # на маленьком размере значка: четыре белые клавиши и две чёрные.
-    key_w = cut * 0.78
-    x0 = -key_w / 2
-    gap = s * 0.035
-    key_h = (2 * s - 3 * gap) / 4 - s * 0.42   # видимая часть ≈ середина
-    y = -key_h * 1.7
-    for _ in range(4):
-        p.fillRect(QRectF(x0, y, key_w, key_h), QColor(237, 237, 241))
-        y += key_h + gap
-    # Чёрные клавиши поверх — два крупных блока.
-    p.fillRect(QRectF(x0, -key_h * 1.7 + key_h * 0.55,
-                      key_w * 0.66, key_h * 0.62), QColor(DARK))
-    p.fillRect(QRectF(x0, -key_h * 1.7 + key_h * 2.45,
-                      key_w * 0.66, key_h * 0.62), QColor(DARK))
-    p.restore()
-
-    # Тонкая светлая кромка по нижнему краю разреза — «блик».
-    p.save()
-    p.translate(s / 2, s / 2)
-    p.rotate(18)
-    p.setClipRect(QRectF(-s, -s, 2 * s, 2 * s))
-    pen_col = QColor(255, 255, 255, 46)
-    p.fillRect(QRectF(cut / 2, -s, s * 0.012, 2 * s), pen_col)
+    bar_w = S * 0.052                      # толщина ноты (поперёк разреза)
+    radius = bar_w * 0.5
+    p.setBrush(QBrush(NOTE))
+    for y0, length in ((-0.220, 0.140), (-0.030, 0.200), (0.220, 0.120)):
+        rect = QRectF(-bar_w / 2, S * y0, bar_w, S * length)
+        p.drawRoundedRect(rect, radius, radius)
     p.restore()
 
     p.end()
@@ -74,10 +92,9 @@ def render(size: int) -> QImage:
 
 
 def main() -> None:
-    app = QGuiApplication(sys.argv)
-    img = render(1024)
+    app = QGuiApplication.instance() or QGuiApplication(sys.argv)
     png = OUT / "AppIcon-1024.png"
-    img.save(str(png))
+    render(1024).save(str(png))
     print("png:", png)
 
     iconset = OUT / "AppIcon.iconset"

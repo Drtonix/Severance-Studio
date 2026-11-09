@@ -204,42 +204,52 @@ QScrollBar::handle:horizontal {{
 
 
 def gradient_pixmap(size: int = 1024) -> QPixmap:
-    """Иконка: круг фирменного градиента, рассечённый диагональной щелью,
-    в разрезе — клавиши (студия) и нота."""
+    """Иконка окна — та же, что AppIcon: расколотый круг, в разрезе ноты."""
+    import math
     pm = QPixmap(size, size)
     pm.fill(Qt.GlobalColor.transparent)
     p = QPainter(pm)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
     s = size
-    grad = QLinearGradient(0, 0, s, s)
+    p.fillRect(QRectF(0, 0, s, s), QColor("#121216"))
+
+    tilt = math.radians(18)
+    cx = cy = s / 2
+    r, gap = s * 0.30, s * 0.075
+    dx, dy = math.sin(tilt), -math.cos(tilt)
+    nx, ny = math.cos(tilt), math.sin(tilt)
+    grad = QLinearGradient(cx - r, cy - r, cx + r, cy + r)
     for pos, col in STOPS:
         grad.setColorAt(pos, QColor(col))
-    r = s * 0.06
-    path = QPainterPath()
-    path.addRoundedRect(QRectF(0, 0, s, s), r, r)
-    p.setClipPath(path)
-    p.fillRect(QRectF(0, 0, s, s), grad)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(grad)
+    big = r * 3
+    for side in (-1, 1):
+        plane = QPainterPath()
+        plane.addPolygon(QPolygonF([
+            QPointF(cx + dx * big, cy + dy * big),
+            QPointF(cx + dx * big + nx * big * side, cy + dy * big + ny * big * side),
+            QPointF(cx - dx * big + nx * big * side, cy - dy * big + ny * big * side),
+            QPointF(cx - dx * big, cy - dy * big),
+        ]))
+        disc = QPainterPath()
+        disc.addEllipse(QPointF(cx, cy), r, r)
+        half = disc.intersected(plane)
+        p.drawPath(half.translated(
+            QPointF(nx * gap * side - dx * gap * 0.55 * side,
+                    ny * gap * side - dy * gap * 0.55 * side)))
 
-    # Щель-«разрез» под 18°, как на оригинальном значке Severance.
-    cut_w = s * 0.085
-    tilt = 0.32
-    p.setClipPath(path)
     p.save()
-    p.translate(s / 2, s / 2)
+    disc = QPainterPath()
+    disc.addEllipse(QPointF(cx, cy), r, r)
+    p.setClipPath(disc)
+    p.translate(cx, cy)
     p.rotate(18)
-    p.fillRect(QRectF(-cut_w / 2, -s, cut_w, 2 * s), QColor(DARK))
-    p.restore()
-
-    # Клавиши в нижней части разреза.
-    p.save()
-    p.translate(s / 2, s / 2)
-    p.rotate(18)
-    key_w = cut_w * 0.62
-    y = s * 0.10
-    for i, h in enumerate((0.16, 0.22, 0.13, 0.19)):
-        col = QColor(255, 255, 255, 235) if i % 2 == 0 else QColor(DARK)
-        p.fillRect(QRectF(-key_w / 2, y, key_w, s * h), col)
-        y += s * (h + 0.018)
+    bar_w = s * 0.052
+    p.setBrush(QColor("#ededf1"))
+    for y0, length in ((-0.220, 0.140), (-0.030, 0.200), (0.220, 0.120)):
+        p.drawRoundedRect(QRectF(-bar_w / 2, s * y0, bar_w, s * length),
+                          bar_w / 2, bar_w / 2)
     p.restore()
     p.end()
     return pm
