@@ -13,7 +13,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QThread, QUrl, Signal, QRectF, QPointF
 from PySide6.QtGui import (QColor, QFont, QFontDatabase, QIcon,
                            QLinearGradient, QPainter, QPainterPath, QPen,
-                           QPixmap)
+                           QPixmap, QPolygonF)
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel,
@@ -59,6 +59,25 @@ def font_family() -> str:
     have = set(QFontDatabase.families())
     return next((f for f in ("Avenir Next", "Helvetica Neue", "Segoe UI")
                  if f in have), "Arial")
+
+
+def _arrow_png(up: bool = False) -> str:
+    """Маленький треугольник-стрелка для комбобоксов/спинбоксов (кэш в /tmp)."""
+    name = "severance_studio_arrow_up.png" if up else "severance_studio_arrow.png"
+    path = Path(tempfile.gettempdir()) / name
+    if not path.exists():
+        pm = QPixmap(10, 7)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(MUTED))
+        pts = ([QPointF(0, 7), QPointF(10, 7), QPointF(5, 0)] if up
+               else [QPointF(0, 0), QPointF(10, 0), QPointF(5, 7)])
+        p.drawPolygon(QPolygonF(pts))
+        p.end()
+        pm.save(str(path))
+    return str(path).replace("\\", "/")
 
 
 def make_style() -> str:
@@ -120,6 +139,38 @@ QComboBox, QSpinBox, QDoubleSpinBox {{
     background: {POPUP};
     border: 1px solid rgba(255,255,255,0.08);
     border-radius: 8px; padding: 5px 10px;
+    min-height: 18px;
+}}
+QComboBox {{ padding-right: 28px; }}
+QComboBox::drop-down {{
+    subcontrol-origin: border; subcontrol-position: center right;
+    width: 24px; border: none;
+}}
+QComboBox::down-arrow {{
+    image: url("{_arrow_png()}");
+    width: 10px; height: 7px;
+}}
+QSpinBox, QDoubleSpinBox {{ padding-right: 2px; }}
+QSpinBox::up-button, QSpinBox::down-button,
+QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{
+    width: 16px; border: none;
+    background: rgba(255,255,255,0.05);
+}}
+QSpinBox::up-button, QDoubleSpinBox::up-button {{
+    subcontrol-position: top right;
+    border-top-right-radius: 7px;
+}}
+QSpinBox::down-button, QDoubleSpinBox::down-button {{
+    subcontrol-position: bottom right;
+    border-bottom-right-radius: 7px;
+}}
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{
+    image: url("{_arrow_png(up=True)}");
+    width: 8px; height: 6px;
+}}
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{
+    image: url("{_arrow_png()}");
+    width: 8px; height: 6px;
 }}
 QComboBox QAbstractItemView {{
     background: {POPUP}; border: 1px solid rgba(255,255,255,0.08);
@@ -392,7 +443,9 @@ class MainWindow(QMainWindow):
         lay.setContentsMargins(4, 12, 4, 4)
         lay.setSpacing(12)
 
-        frame, bar = _group()
+        frame = QFrame(objectName="group")
+        bar = QHBoxLayout(frame)
+        bar.setContentsMargins(16, 10, 16, 10)
         bar.setSpacing(10)
         self.track_combo = QComboBox()
         self.track_combo.setMinimumWidth(220)
@@ -414,7 +467,9 @@ class MainWindow(QMainWindow):
         bar.addStretch()
         lay.addWidget(frame)
 
-        tune, tlay = _group()
+        tune = QFrame(objectName="group")
+        tlay = QHBoxLayout(tune)
+        tlay.setContentsMargins(16, 10, 16, 10)
         tlay.setSpacing(10)
         tlay.addWidget(QLabel("Порог", objectName="dim"))
         self.onset_spin = QDoubleSpinBox(minimum=0.1, maximum=0.95,
@@ -671,6 +726,7 @@ class MainWindow(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
+    app.setStyle("Fusion")  # macOS-стиль игнорирует половину QSS
     app.setStyleSheet(make_style())
     app.setWindowIcon(QIcon(gradient_pixmap(256)))
     win = MainWindow()

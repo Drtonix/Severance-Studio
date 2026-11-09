@@ -40,22 +40,24 @@ def render(size: int) -> QImage:
     p.save()
     p.translate(s / 2, s / 2)
     p.rotate(18)
-    cut = s * 0.13
+    cut = s * 0.15
     p.fillRect(QRectF(-cut / 2, -s, cut, 2 * s), QColor(DARK))
 
-    # Клавиши внутри разреза: белые и чёрные, как фрагмент пиано-ролла.
-    key_w = cut * 0.66
+    # Клавиши внутри разреза — крупные блоки, чтобы читались даже
+    # на маленьком размере значка: четыре белые клавиши и две чёрные.
+    key_w = cut * 0.78
     x0 = -key_w / 2
-    y = -s * 0.52
-    whites = (0.30, 0.24, 0.34, 0.22, 0.28, 0.26)
-    for i, h in enumerate(whites):
-        p.fillRect(QRectF(x0, y, key_w, s * h), QColor(237, 237, 241))
-        y += s * (h + 0.025)
-    # Чёрные клавиши поверх, со сдвигом.
-    y = -s * 0.52 + s * 0.20
-    for h in (0.16, 0.13, 0.17, 0.12, 0.15):
-        p.fillRect(QRectF(x0, y, key_w * 0.62, s * h), QColor(DARK))
-        y += s * (h + 0.135)
+    gap = s * 0.035
+    key_h = (2 * s - 3 * gap) / 4 - s * 0.42   # видимая часть ≈ середина
+    y = -key_h * 1.7
+    for _ in range(4):
+        p.fillRect(QRectF(x0, y, key_w, key_h), QColor(237, 237, 241))
+        y += key_h + gap
+    # Чёрные клавиши поверх — два крупных блока.
+    p.fillRect(QRectF(x0, -key_h * 1.7 + key_h * 0.55,
+                      key_w * 0.66, key_h * 0.62), QColor(DARK))
+    p.fillRect(QRectF(x0, -key_h * 1.7 + key_h * 2.45,
+                      key_w * 0.66, key_h * 0.62), QColor(DARK))
     p.restore()
 
     # Тонкая светлая кромка по нижнему краю разреза — «блик».
