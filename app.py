@@ -1,42 +1,81 @@
-"""Severance Studio — каркас приложения (этап 1).
+"""Severance Studio — этап 2: пиано-ролл с редактированием и предпрослушкой.
 
-Вкладки: Дорожки (стемы), Пиано-ролл, Голоса, Экспорт в Ableton.
 Запуск из исходников: uv run python app.py
 """
 from __future__ import annotations
 
 import sys
+import tempfile
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QThread, QUrl, Signal
+from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
-    QApplication, QFileDialog, QLabel, QMainWindow, QPlainTextEdit,
-    QPushButton, QTabWidget, QVBoxLayout, QWidget,
+    QApplication, QComboBox, QFileDialog, QHBoxLayout, QLabel,
+    QMainWindow, QPlainTextEdit, QPushButton, QScrollArea, QSpinBox,
+    QDoubleSpinBox, QTabWidget, QVBoxLayout, QWidget,
 )
+
+import engine
+from engine import Project, Track
+from pianoroll import PianoRoll
 
 STYLE = """
 QWidget { background: #1b1b1f; color: #e8e8ec; font-size: 14px; }
 QPushButton { background: #2d2d35; border: 1px solid #3d3d48;
     border-radius: 8px; padding: 8px 16px; }
 QPushButton:hover { background: #3a3a45; }
+QPushButton:disabled { color: #666670; }
 QTabWidget::pane { border: none; }
 QTabBar::tab { background: #232329; padding: 8px 20px;
     border-top-left-radius: 8px; border-top-right-radius: 8px; }
 QTabBar::tab:selected { background: #2d2d35; }
 QPlainTextEdit { background: #141418; border: 1px solid #2d2d35;
     border-radius: 8px; }
+QComboBox, QSpinBox, QDoubleSpinBox { background: #2d2d35;
+    border: 1px solid #3d3d48; border-radius: 6px; padding: 4px 8px; }
 """
+
+STEM_TITLES = {
+    "vocals": "Голос", "drums": "Барабаны", "bass": "Бас",
+    "other": "Прочее", "guitar": "Гитара", "piano": "Клавишные",
+}
+WAVE_TITLES = {"saw": "Пила", "square": "Меандр",
+               "triangle": "Треугольная", "sine": "Синус"}
+
+
+class PipelineThread(QThread):
+    """Фон: трек → стемы → ноты."""
+    progress = Signal(str)
+    done = Signal(object)
+
+    def __init__(self, src: Path, work: Path):
+        super().__init__()
+        self.src, self.work = src, work
+
+    def run(self):
+        try:
+            self.progress.emit("Разбор на дорожки (demucs-mlx)…")
+            stem_files = engine.stems(self.src, self.work / "stems")
+            project = Project(name=self.src.stem, source=self.src)
+            for stem, wav in stem_files.items():
+                self.progress.emit(f"Ноты: {STEM_TITLES.get(stem, stem)}…")
+                notes = engine.transcribe(wav)
+                project.tracks.append(Track(stem=stem, audio=wav, notes=notes))
+            self.done.emit(project)
+        except Exception as e:  # noqa: BLE001 — показать в логе любой сбой
+            self.progress.emit(f"Ошибка: {e}")
+            self.done.emit(None)
 
 
 class DropLabel(QLabel):
-    """Поле «перетащи трек сюда»."""
+    fileDropped = Signal(str)
 
-    def __init__(self, on_file):
-        super().__init__("Перетащите сюда трек или вставьте ссылку")
-        self.on_file = on_file
+    def __init__(self):
+        super().__init__("Перетащите сюда трек (wav, mp3) или нажмите для выбора")
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setAcceptDrops(True)
-        self.setMinimumHeight(120)
+        self.setMinimumHeight(110)
         self.setStyleSheet("border: 2px dashed #3d3d48; border-radius: 12px;")
 
     def dragEnterEvent(self, e):
@@ -45,35 +84,94 @@ class DropLabel(QLabel):
 
     def dropEvent(self, e):
         url = e.mimeData().urls()[0]
-        self.on_file(url.toLocalFile() if url.isLocalFile() else url.toString())
+        if url.isLocalFile():
+            self.fileDropped.emit(url.toLocalFile())
+
+    def mousePressEvent(self, _):
+        f, _ = QFileDialog.getOpenFileName(
+            self, "Выбор трека", "", "Аудио (*.wav *.mp3 *.flac *.m4a)")
+        if f:
+            self.fileDropped.emit(f)
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Severance Studio")
-        self.resize(1100, 720)
-        self.project = None
+        self.resize(1200, 780)
+        self.project: Project | None = None
+        self.current: Track | None = None
+        self.thread: PipelineThread | None = None
+        self._preview = Path(tempfile.gettempdir()) / "severance_studio_preview.wav"
+
+        self.player = QMediaPlayer(self)
+        self.audio = QAudioOutput(self)
+        self.player.setAudioOutput(self.audio)
+        self.player.positionChanged.connect(
+            lambda ms: self.roll.set_playhead(ms / 1000))
 
         tabs = QTabWidget()
+        self.tabs = tabs
         tabs.addTab(self._tracks_tab(), "Дорожки")
-        tabs.addTab(self._pianoroll_tab(), "Пиано-ролл")
+        tabs.addTab(self._roll_tab(), "Пиано-ролл")
         tabs.addTab(self._voices_tab(), "Голоса")
         tabs.addTab(self._export_tab(), "Экспорт в Ableton")
         self.setCentralWidget(tabs)
 
+    # ------------------------------------------------------------ вкладки
+
     def _tracks_tab(self) -> QWidget:
         w = QWidget()
         lay = QVBoxLayout(w)
-        lay.addWidget(DropLabel(self._load_source))
+        drop = DropLabel()
+        drop.fileDropped.connect(self._load_source)
+        lay.addWidget(drop)
+        self.stem_bar = QHBoxLayout()
+        lay.addLayout(self.stem_bar)
         self.log = QPlainTextEdit(readOnly=True)
         lay.addWidget(self.log)
         return w
 
-    def _pianoroll_tab(self) -> QWidget:
+    def _roll_tab(self) -> QWidget:
         w = QWidget()
         lay = QVBoxLayout(w)
-        lay.addWidget(QLabel("Пиано-ролл дорожки появится здесь — этап 2."))
+
+        bar = QHBoxLayout()
+        self.track_combo = QComboBox()
+        self.track_combo.currentIndexChanged.connect(self._pick_track)
+        bar.addWidget(QLabel("Дорожка:"))
+        bar.addWidget(self.track_combo)
+
+        self.wave_combo = QComboBox()
+        self.wave_combo.addItems(WAVE_TITLES.values())
+        bar.addWidget(QLabel("Звук:"))
+        bar.addWidget(self.wave_combo)
+
+        self.play_btn = QPushButton("▶ Играть")
+        self.play_btn.clicked.connect(self._play)
+        bar.addWidget(self.play_btn)
+        stop = QPushButton("■")
+        stop.clicked.connect(self._stop)
+        bar.addWidget(stop)
+
+        bar.addSpacing(20)
+        bar.addWidget(QLabel("Порог:"))
+        self.onset_spin = QDoubleSpinBox(minimum=0.1, maximum=0.95,
+                                         singleStep=0.05, value=0.6)
+        bar.addWidget(self.onset_spin)
+        bar.addWidget(QLabel("Мин. нота, мс:"))
+        self.minlen_spin = QSpinBox(minimum=20, maximum=500, value=90)
+        bar.addWidget(self.minlen_spin)
+        refilter = QPushButton("Пересчитать")
+        refilter.clicked.connect(self._refilter)
+        bar.addWidget(refilter)
+        bar.addStretch()
+        lay.addLayout(bar)
+
+        self.roll = PianoRoll()
+        scroll = QScrollArea()
+        scroll.setWidget(self.roll)
+        lay.addWidget(scroll)
         return w
 
     def _voices_tab(self) -> QWidget:
@@ -81,25 +179,84 @@ class MainWindow(QMainWindow):
         lay = QVBoxLayout(w)
         lay.addWidget(QLabel(
             "Голосовая лаборатория — этап 4.\n"
-            "Промпт → голос → пение на мелодию трека (RU/EN)."))
+            "Промпт → свой вокалоид → пение на мелодию трека (RU/EN).\n"
+            "Библиотека голосов: добавление в пару кликов."))
         return w
 
     def _export_tab(self) -> QWidget:
         w = QWidget()
         lay = QVBoxLayout(w)
-        btn = QPushButton("Экспортировать проект для Ableton…")
+        btn = QPushButton("Экспортировать стемы + MIDI для Ableton…")
         btn.clicked.connect(self._export)
         lay.addWidget(btn)
         lay.addStretch()
         return w
 
+    # ------------------------------------------------------------ логика
+
     def _load_source(self, src: str):
-        self.log.appendPlainText(f"Источник: {src}\n(разбор подключим следом)")
+        if self.thread and self.thread.isRunning():
+            return
+        self.log.appendPlainText(f"Источник: {src}")
+        work = Path("output") / Path(src).stem
+        self.thread = PipelineThread(Path(src), work)
+        self.thread.progress.connect(self.log.appendPlainText)
+        self.thread.done.connect(self._pipeline_done)
+        self.thread.start()
+
+    def _pipeline_done(self, project: Project | None):
+        if not project:
+            return
+        self.project = project
+        self.track_combo.clear()
+        for t in project.tracks:
+            self.track_combo.addItem(
+                f"{STEM_TITLES.get(t.stem, t.stem)} ({len(t.notes)} нот)")
+        self.log.appendPlainText(
+            f"Готово: {len(project.tracks)} дорожек. Откройте «Пиано-ролл».")
+        self.tabs.setCurrentIndex(1)
+
+    def _pick_track(self, i: int):
+        if not self.project or i < 0 or i >= len(self.project.tracks):
+            return
+        self.current = self.project.tracks[i]
+        self.roll.set_notes(self.current.notes)
+        self.roll.fit_content()
+
+    def _refilter(self):
+        if not self.current:
+            return
+        t = self.current
+        self.log.appendPlainText(f"Пересчёт нот: {STEM_TITLES.get(t.stem)}…")
+        t.notes = engine.transcribe(
+            t.audio, onset=self.onset_spin.value(),
+            min_len_ms=float(self.minlen_spin.value()))
+        self.roll.set_notes(t.notes)
+        self.roll.fit_content()
+        self.log.appendPlainText(f"Нот после фильтров: {len(t.notes)}")
+
+    def _play(self):
+        if not self.current or not self.current.notes:
+            return
+        wave = [k for k, v in WAVE_TITLES.items()
+                if v == self.wave_combo.currentText()][0]
+        engine.render_preview(self.current.notes, self._preview, waveform=wave)
+        self.player.setSource(QUrl.fromLocalFile(str(self._preview)))
+        self.player.play()
+
+    def _stop(self):
+        self.player.stop()
+        self.roll.set_playhead(-1)
 
     def _export(self):
+        if not self.project:
+            self.log.appendPlainText("Сначала загрузите трек.")
+            return
         folder = QFileDialog.getExistingDirectory(self, "Куда экспортировать")
         if folder:
-            self.log.appendPlainText(f"Экспорт в {folder} — этап 3.")
+            out = engine.export_live(self.project, Path(folder)
+                                     / f"{self.project.name} — Severance Studio")
+            self.log.appendPlainText(f"Экспортировано в {out}")
 
 
 def main():

@@ -59,12 +59,23 @@ def stems(wav: Path, out: Path, progress=None) -> dict[str, Path]:
 
 # ---------------------------------------------------------------- ноты
 
-def transcribe(stem_audio: Path, progress=None) -> list[Note]:
+def transcribe(stem_audio: Path, progress=None, *,
+               onset: float = 0.6, frame: float = 0.4,
+               min_len_ms: float = 90.0,
+               min_pitch: int = 21, max_pitch: int = 108) -> list[Note]:
     """Дорожка → список нот. Basic Pitch на CoreML: мелодика и бас.
-    Ударные транскрибируются отдельным проходом (см. transcribe_drums)."""
+    Ударные транскрибируются отдельным проходом (см. transcribe_drums).
+
+    onset/frame — пороги уверенности модели (выше = чище, но пропуски),
+    min_len_ms — отсечка коротких шумовых нот."""
     from basic_pitch.inference import predict
 
-    _, midi_data, _ = predict(str(stem_audio))
+    _, midi_data, _ = predict(
+        str(stem_audio),
+        onset_threshold=onset,
+        frame_threshold=frame,
+        minimum_note_length=min_len_ms,
+    )
     notes = [
         Note(start=n.start,
              duration=n.end - n.start,
@@ -72,6 +83,7 @@ def transcribe(stem_audio: Path, progress=None) -> list[Note]:
              velocity=n.velocity)
         for inst in midi_data.instruments
         for n in inst.notes
+        if min_pitch <= n.pitch <= max_pitch
     ]
     notes.sort(key=lambda n: n.start)
     return notes
@@ -110,6 +122,54 @@ def export_live(project: Project, out_dir: Path, progress=None) -> Path:
         if track.notes:
             to_midi(track, out_dir / f"{track.stem}.mid", project.bpm)
     return out_dir
+
+
+# ---------------------------------------------------------------- превью
+
+WAVEFORMS = ("sine", "triangle", "saw", "square")
+
+
+def render_preview(notes: list[Note], out: Path, *,
+                   waveform: str = "saw", sr: int = 44100) -> Path:
+    """Ноты → wav для предпрослушки. Простой синтез с ADSR-огибающей:
+    звук меняется параметром waveform, пиано-ролл остаётся тем же."""
+    import numpy as np
+    import soundfile as sf
+
+    end = max((n.start + n.duration for n in notes), default=1.0) + 0.3
+    mix = np.zeros(int(end * sr), dtype=np.float32)
+    t_cache: dict[int, np.ndarray] = {}
+
+    for n in notes:
+        freq = 440.0 * 2 ** ((n.pitch - 69) / 12)
+        N = max(1, int(n.duration * sr))
+        if N not in t_cache:
+            t_cache[N] = np.arange(N) / sr
+        t = t_cache[N]
+        ph = 2 * np.pi * freq * t
+        if waveform == "sine":
+            wave = np.sin(ph)
+        elif waveform == "triangle":
+            wave = 2 * np.abs(2 * ((freq * t) % 1) - 1) - 1
+        elif waveform == "square":
+            wave = np.sign(np.sin(ph))
+        else:  # saw
+            wave = 2 * ((freq * t) % 1) - 1
+        # ADSR: короткая атака, линейный спад к концу ноты
+        a = max(1, int(0.01 * sr))
+        env = np.ones(N, dtype=np.float32)
+        env[:a] = np.linspace(0, 1, a)
+        env *= np.linspace(1, 0.6, N)
+        amp = (n.velocity / 127) * 0.2
+        i0 = int(n.start * sr)
+        mix[i0:i0 + N] += (wave * env * amp).astype(np.float32)
+
+    peak = np.max(np.abs(mix))
+    if peak > 1e-6:
+        mix *= 0.8 / peak          # нормализация до −2 дБ
+    mix = np.tanh(mix * 1.4).astype(np.float32)  # мягкий лимитер от перегруза
+    sf.write(str(out), mix, sr)
+    return out
 
 
 # ---------------------------------------------------------------- голоса
