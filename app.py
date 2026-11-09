@@ -11,7 +11,7 @@ import tempfile
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, QUrl, Signal, QRectF, QPointF
-from PySide6.QtGui import (QColor, QFont, QFontDatabase, QIcon,
+from PySide6.QtGui import (QColor, QFont, QFontDatabase,
                            QLinearGradient, QPainter, QPainterPath, QPen,
                            QPixmap, QPolygonF)
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
@@ -201,58 +201,6 @@ QScrollBar::handle:horizontal {{
     background: rgba(255,255,255,0.12); border-radius: 3px; min-width: 30px;
 }}
 """
-
-
-def gradient_pixmap(size: int = 1024) -> QPixmap:
-    """Иконка окна — та же, что AppIcon: расколотый круг, в разрезе ноты."""
-    import math
-    pm = QPixmap(size, size)
-    pm.fill(Qt.GlobalColor.transparent)
-    p = QPainter(pm)
-    p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    s = size
-    p.fillRect(QRectF(0, 0, s, s), QColor("#121216"))
-
-    tilt = math.radians(18)
-    cx = cy = s / 2
-    r, gap = s * 0.30, s * 0.075
-    dx, dy = math.sin(tilt), -math.cos(tilt)
-    nx, ny = math.cos(tilt), math.sin(tilt)
-    grad = QLinearGradient(cx - r, cy - r, cx + r, cy + r)
-    for pos, col in STOPS:
-        grad.setColorAt(pos, QColor(col))
-    p.setPen(Qt.PenStyle.NoPen)
-    p.setBrush(grad)
-    big = r * 3
-    for side in (-1, 1):
-        plane = QPainterPath()
-        plane.addPolygon(QPolygonF([
-            QPointF(cx + dx * big, cy + dy * big),
-            QPointF(cx + dx * big + nx * big * side, cy + dy * big + ny * big * side),
-            QPointF(cx - dx * big + nx * big * side, cy - dy * big + ny * big * side),
-            QPointF(cx - dx * big, cy - dy * big),
-        ]))
-        disc = QPainterPath()
-        disc.addEllipse(QPointF(cx, cy), r, r)
-        half = disc.intersected(plane)
-        p.drawPath(half.translated(
-            QPointF(nx * gap * side - dx * gap * 0.55 * side,
-                    ny * gap * side - dy * gap * 0.55 * side)))
-
-    p.save()
-    disc = QPainterPath()
-    disc.addEllipse(QPointF(cx, cy), r, r)
-    p.setClipPath(disc)
-    p.translate(cx, cy)
-    p.rotate(18)
-    bar_w = s * 0.052
-    p.setBrush(QColor("#ededf1"))
-    for y0, length in ((-0.220, 0.140), (-0.030, 0.200), (0.220, 0.120)):
-        p.drawRoundedRect(QRectF(-bar_w / 2, s * y0, bar_w, s * length),
-                          bar_w / 2, bar_w / 2)
-    p.restore()
-    p.end()
-    return pm
 
 
 class OrbWidget(QWidget):
@@ -738,7 +686,8 @@ def main():
     app = QApplication(sys.argv)
     app.setStyle("Fusion")  # macOS-стиль игнорирует половину QSS
     app.setStyleSheet(make_style())
-    app.setWindowIcon(QIcon(gradient_pixmap(256)))
+    # Иконку окна не ставим вручную: на macOS Dock и Launchpad
+    # берут AppIcon.icns из бандла и сами применяют маску-скругление.
     win = MainWindow()
     win.show()
     sys.exit(app.exec())
