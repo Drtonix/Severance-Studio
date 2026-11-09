@@ -1,6 +1,8 @@
-"""Severance Studio — этап 2: пиано-ролл с редактированием и предпрослушкой.
+"""Severance Studio — разбор треков, пиано-ролл, вокалоиды, экспорт в Ableton.
 
 Запуск из исходников: uv run python app.py
+Оформление — в духе Severance: тёмная тема, фирменный градиент,
+цвета дорожек из оригинального приложения.
 """
 from __future__ import annotations
 
@@ -8,10 +10,13 @@ import sys
 import tempfile
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, QUrl, Signal
+from PySide6.QtCore import Qt, QThread, QUrl, Signal, QRectF, QPointF
+from PySide6.QtGui import (QColor, QFont, QFontDatabase, QIcon,
+                           QLinearGradient, QPainter, QPainterPath, QPen,
+                           QPixmap)
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QFileDialog, QHBoxLayout, QLabel,
+    QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel,
     QLineEdit, QListWidget, QMainWindow, QPlainTextEdit, QPushButton,
     QScrollArea, QSpinBox, QDoubleSpinBox, QTabWidget, QVBoxLayout,
     QWidget,
@@ -22,28 +27,198 @@ import voices as voice_lab
 from engine import Project, Track
 from pianoroll import PianoRoll
 
-STYLE = """
-QWidget { background: #1b1b1f; color: #e8e8ec; font-size: 14px; }
-QPushButton { background: #2d2d35; border: 1px solid #3d3d48;
-    border-radius: 8px; padding: 8px 16px; }
-QPushButton:hover { background: #3a3a45; }
-QPushButton:disabled { color: #666670; }
-QTabWidget::pane { border: none; }
-QTabBar::tab { background: #232329; padding: 8px 20px;
-    border-top-left-radius: 8px; border-top-right-radius: 8px; }
-QTabBar::tab:selected { background: #2d2d35; }
-QPlainTextEdit { background: #141418; border: 1px solid #2d2d35;
-    border-radius: 8px; }
-QComboBox, QSpinBox, QDoubleSpinBox { background: #2d2d35;
-    border: 1px solid #3d3d48; border-radius: 6px; padding: 4px 8px; }
-"""
+# ---------------------------------------------------------------- оформление
+# Палитра и градиент — те же, что в Severance.
+BG = "#101013"
+TEXT = "#ededf1"
+MUTED = "#8d8d97"
+FAINT = "#5b5b65"
+SOFT = "#c4c4cc"
+POPUP = "#1c1c21"
+LINK = "#93a2ff"
+DARK = "#16161a"
+STOPS = ((0.0, "#ffb15c"), (0.34, "#ff5a7a"), (0.68, "#8a5cff"), (1.0, "#3cc8f0"))
+GRADIENT = ("qlineargradient(x1:0, y1:0, x2:1, y2:1, "
+            "stop:0 #ffb15c, stop:0.34 #ff5a7a, "
+            "stop:0.68 #8a5cff, stop:1 #3cc8f0)")
 
 STEM_TITLES = {
     "vocals": "Голос", "drums": "Барабаны", "bass": "Бас",
     "other": "Прочее", "guitar": "Гитара", "piano": "Клавишные",
 }
+# Цвета дорожек — из оригинального Severance (LANES).
+STEM_COLORS = {
+    "vocals": "#ff5a7a", "drums": "#a07cff", "bass": "#6f7dff",
+    "guitar": "#45b4ff", "piano": "#3fd6d0", "other": "#8098bb",
+}
 WAVE_TITLES = {"saw": "Пила", "square": "Меандр",
                "triangle": "Треугольная", "sine": "Синус"}
+
+
+def font_family() -> str:
+    have = set(QFontDatabase.families())
+    return next((f for f in ("Avenir Next", "Helvetica Neue", "Segoe UI")
+                 if f in have), "Arial")
+
+
+def make_style() -> str:
+    return f"""
+* {{ outline: none; font-family: "{font_family()}"; }}
+QWidget {{ background: {BG}; color: {TEXT}; font-size: 13px; }}
+QLabel {{ background: transparent; }}
+QLabel#title {{ font-size: 22px; font-weight: 600; }}
+QLabel#sub {{ color: {MUTED}; font-size: 12px; }}
+QLabel#h {{ font-size: 15px; font-weight: 600; }}
+QLabel#dim {{ color: {MUTED}; }}
+
+QFrame#group {{
+    background: rgba(255,255,255,0.045);
+    border-radius: 12px;
+}}
+QFrame#rule {{ background: rgba(255,255,255,0.07); max-height: 1px; }}
+
+QPushButton {{
+    background: rgba(255,255,255,0.06);
+    border: none; border-radius: 10px;
+    padding: 8px 16px;
+}}
+QPushButton:hover {{ background: rgba(255,255,255,0.10); }}
+QPushButton:pressed {{ background: rgba(255,255,255,0.14); }}
+QPushButton:disabled {{ color: {FAINT}; background: rgba(255,255,255,0.03); }}
+QPushButton#primary {{
+    background: {GRADIENT};
+    color: {DARK}; font-weight: 600;
+    border-radius: 12px; padding: 10px 22px;
+}}
+QPushButton#primary:hover {{ opacity: 0.92; }}
+QPushButton#primary:disabled {{
+    background: rgba(255,255,255,0.06); color: {FAINT};
+}}
+
+QTabWidget::pane {{ border: none; top: -1px; }}
+QTabBar {{ alignment: center; }}
+QTabBar::tab {{
+    background: transparent; color: {MUTED};
+    padding: 8px 18px; margin: 2px;
+    border-radius: 9px;
+}}
+QTabBar::tab:hover {{ color: {TEXT}; }}
+QTabBar::tab:selected {{
+    background: rgba(255,255,255,0.08); color: {TEXT}; font-weight: 600;
+}}
+
+QPlainTextEdit, QLineEdit {{
+    background: rgba(0,0,0,0.25);
+    border: 1px solid rgba(255,255,255,0.07);
+    border-radius: 10px; padding: 8px;
+    selection-background-color: rgba(255,90,122,0.45);
+}}
+QPlainTextEdit:focus, QLineEdit:focus {{
+    border: 1px solid rgba(147,162,255,0.55);
+}}
+QComboBox, QSpinBox, QDoubleSpinBox {{
+    background: {POPUP};
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 8px; padding: 5px 10px;
+}}
+QComboBox QAbstractItemView {{
+    background: {POPUP}; border: 1px solid rgba(255,255,255,0.08);
+    selection-background-color: rgba(255,255,255,0.10);
+}}
+QListWidget {{
+    background: rgba(0,0,0,0.20);
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 12px; padding: 6px;
+}}
+QListWidget::item {{
+    border-radius: 8px; padding: 8px 10px;
+}}
+QListWidget::item:selected {{
+    background: rgba(138,92,255,0.25);
+}}
+QListWidget::item:hover {{ background: rgba(255,255,255,0.06); }}
+
+QScrollArea {{ background: transparent; border: none; }}
+QScrollBar:vertical {{ background: transparent; width: 8px; margin: 2px; }}
+QScrollBar::handle:vertical {{
+    background: rgba(255,255,255,0.12); border-radius: 3px; min-height: 30px;
+}}
+QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; }}
+QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
+QScrollBar:horizontal {{ background: transparent; height: 8px; margin: 2px; }}
+QScrollBar::handle:horizontal {{
+    background: rgba(255,255,255,0.12); border-radius: 3px; min-width: 30px;
+}}
+"""
+
+
+def gradient_pixmap(size: int = 1024) -> QPixmap:
+    """Иконка: круг фирменного градиента, рассечённый диагональной щелью,
+    в разрезе — клавиши (студия) и нота."""
+    pm = QPixmap(size, size)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    s = size
+    grad = QLinearGradient(0, 0, s, s)
+    for pos, col in STOPS:
+        grad.setColorAt(pos, QColor(col))
+    r = s * 0.06
+    path = QPainterPath()
+    path.addRoundedRect(QRectF(0, 0, s, s), r, r)
+    p.setClipPath(path)
+    p.fillRect(QRectF(0, 0, s, s), grad)
+
+    # Щель-«разрез» под 18°, как на оригинальном значке Severance.
+    cut_w = s * 0.085
+    tilt = 0.32
+    p.setClipPath(path)
+    p.save()
+    p.translate(s / 2, s / 2)
+    p.rotate(18)
+    p.fillRect(QRectF(-cut_w / 2, -s, cut_w, 2 * s), QColor(DARK))
+    p.restore()
+
+    # Клавиши в нижней части разреза.
+    p.save()
+    p.translate(s / 2, s / 2)
+    p.rotate(18)
+    key_w = cut_w * 0.62
+    y = s * 0.10
+    for i, h in enumerate((0.16, 0.22, 0.13, 0.19)):
+        col = QColor(255, 255, 255, 235) if i % 2 == 0 else QColor(DARK)
+        p.fillRect(QRectF(-key_w / 2, y, key_w, s * h), col)
+        y += s * (h + 0.018)
+    p.restore()
+    p.end()
+    return pm
+
+
+class OrbWidget(QWidget):
+    """Маленький значок-шар в шапке."""
+
+    def __init__(self, d: int = 34):
+        super().__init__()
+        self.setFixedSize(d, d)
+        self._d = d
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        d = self._d
+        grad = QLinearGradient(0, 0, d, d)
+        for pos, col in STOPS:
+            grad.setColorAt(pos, QColor(col))
+        path = QPainterPath()
+        path.addEllipse(QRectF(0.5, 0.5, d - 1, d - 1))
+        p.setClipPath(path)
+        p.fillRect(QRectF(0, 0, d, d), grad)
+        p.save()
+        p.translate(d / 2, d / 2)
+        p.rotate(18)
+        p.fillRect(QRectF(-d * 0.05, -d, d * 0.1, 2 * d), QColor(BG))
+        p.restore()
+        p.end()
 
 
 class PipelineThread(QThread):
@@ -103,17 +278,27 @@ class DropLabel(QLabel):
     fileDropped = Signal(str)
 
     def __init__(self):
-        super().__init__("Перетащите сюда трек (wav, mp3) или нажмите для выбора")
+        super().__init__("Перетащите сюда трек (wav, mp3)\nили нажмите для выбора")
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setAcceptDrops(True)
         self.setMinimumHeight(110)
-        self.setStyleSheet("border: 2px dashed #3d3d48; border-radius: 12px;")
+        self._normal = (f"border: 1.5px dashed rgba(255,255,255,0.16);"
+                        f"border-radius: 12px; color: {MUTED};")
+        self._hover = (f"border: 1.5px dashed rgba(147,162,255,0.7);"
+                       f"border-radius: 12px; color: {TEXT};"
+                       f"background: rgba(138,92,255,0.08);")
+        self.setStyleSheet(self._normal)
 
     def dragEnterEvent(self, e):
         if e.mimeData().hasUrls():
             e.acceptProposedAction()
+            self.setStyleSheet(self._hover)
+
+    def dragLeaveEvent(self, _):
+        self.setStyleSheet(self._normal)
 
     def dropEvent(self, e):
+        self.setStyleSheet(self._normal)
         url = e.mimeData().urls()[0]
         if url.isLocalFile():
             self.fileDropped.emit(url.toLocalFile())
@@ -125,11 +310,21 @@ class DropLabel(QLabel):
             self.fileDropped.emit(f)
 
 
+def _group(title: str | None = None) -> tuple[QFrame, QVBoxLayout]:
+    frame = QFrame(objectName="group")
+    lay = QVBoxLayout(frame)
+    lay.setContentsMargins(16, 14, 16, 14)
+    lay.setSpacing(10)
+    if title:
+        lay.addWidget(QLabel(title, objectName="h"))
+    return frame, lay
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Severance Studio")
-        self.resize(1200, 780)
+        self.resize(1180, 800)
         self.project: Project | None = None
         self.current: Track | None = None
         self.thread: PipelineThread | None = None
@@ -141,106 +336,176 @@ class MainWindow(QMainWindow):
         self.player.positionChanged.connect(
             lambda ms: self.roll.set_playhead(ms / 1000))
 
+        root = QWidget(objectName="root")
+        root_lay = QVBoxLayout(root)
+        root_lay.setContentsMargins(20, 16, 20, 12)
+        root_lay.setSpacing(12)
+
+        # Шапка: шар + название.
+        head = QHBoxLayout()
+        head.addWidget(OrbWidget(34))
+        col = QVBoxLayout()
+        col.setSpacing(0)
+        col.addWidget(QLabel("Severance Studio", objectName="title"))
+        col.addWidget(QLabel("разбор · пиано-ролл · вокалоиды · Ableton Live",
+                             objectName="sub"))
+        head.addLayout(col)
+        head.addStretch()
+        root_lay.addLayout(head)
+
         tabs = QTabWidget()
         self.tabs = tabs
         tabs.addTab(self._tracks_tab(), "Дорожки")
         tabs.addTab(self._roll_tab(), "Пиано-ролл")
         tabs.addTab(self._voices_tab(), "Голоса")
         tabs.addTab(self._export_tab(), "Экспорт в Ableton")
-        self.setCentralWidget(tabs)
+        root_lay.addWidget(tabs)
+        self.setCentralWidget(root)
 
     # ------------------------------------------------------------ вкладки
 
     def _tracks_tab(self) -> QWidget:
         w = QWidget()
         lay = QVBoxLayout(w)
+        lay.setContentsMargins(4, 12, 4, 4)
+        lay.setSpacing(12)
         drop = DropLabel()
         drop.fileDropped.connect(self._load_source)
         lay.addWidget(drop)
+
+        frame, flay = _group("Дорожки проекта")
         self.stem_bar = QHBoxLayout()
-        lay.addLayout(self.stem_bar)
+        self.stem_bar.setSpacing(8)
+        self.stem_bar.addStretch()
+        flay.addLayout(self.stem_bar)
+        lay.addWidget(frame)
+
+        logf, llay = _group("Журнал")
         self.log = QPlainTextEdit(readOnly=True)
-        lay.addWidget(self.log)
+        llay.addWidget(self.log)
+        lay.addWidget(logf, stretch=1)
         return w
 
     def _roll_tab(self) -> QWidget:
         w = QWidget()
         lay = QVBoxLayout(w)
+        lay.setContentsMargins(4, 12, 4, 4)
+        lay.setSpacing(12)
 
-        bar = QHBoxLayout()
+        frame, bar = _group()
+        bar.setSpacing(10)
         self.track_combo = QComboBox()
+        self.track_combo.setMinimumWidth(220)
         self.track_combo.currentIndexChanged.connect(self._pick_track)
-        bar.addWidget(QLabel("Дорожка:"))
+        bar.addWidget(QLabel("Дорожка", objectName="dim"))
         bar.addWidget(self.track_combo)
 
         self.wave_combo = QComboBox()
         self.wave_combo.addItems(WAVE_TITLES.values())
-        bar.addWidget(QLabel("Звук:"))
+        bar.addWidget(QLabel("Звук", objectName="dim"))
         bar.addWidget(self.wave_combo)
 
-        self.play_btn = QPushButton("▶ Играть")
+        self.play_btn = QPushButton("▶  Играть", objectName="primary")
         self.play_btn.clicked.connect(self._play)
         bar.addWidget(self.play_btn)
         stop = QPushButton("■")
         stop.clicked.connect(self._stop)
         bar.addWidget(stop)
+        bar.addStretch()
+        lay.addWidget(frame)
 
-        bar.addSpacing(20)
-        bar.addWidget(QLabel("Порог:"))
+        tune, tlay = _group()
+        tlay.setSpacing(10)
+        tlay.addWidget(QLabel("Порог", objectName="dim"))
         self.onset_spin = QDoubleSpinBox(minimum=0.1, maximum=0.95,
                                          singleStep=0.05, value=0.6)
-        bar.addWidget(self.onset_spin)
-        bar.addWidget(QLabel("Мин. нота, мс:"))
+        tlay.addWidget(self.onset_spin)
+        tlay.addWidget(QLabel("Мин. нота, мс", objectName="dim"))
         self.minlen_spin = QSpinBox(minimum=20, maximum=500, value=90)
-        bar.addWidget(self.minlen_spin)
+        tlay.addWidget(self.minlen_spin)
         refilter = QPushButton("Пересчитать")
         refilter.clicked.connect(self._refilter)
-        bar.addWidget(refilter)
-        bar.addStretch()
-        lay.addLayout(bar)
+        tlay.addWidget(refilter)
+        tlay.addStretch()
+        lay.addWidget(tune)
 
         self.roll = PianoRoll()
         scroll = QScrollArea()
         scroll.setWidget(self.roll)
-        lay.addWidget(scroll)
+        lay.addWidget(scroll, stretch=1)
         return w
 
     def _voices_tab(self) -> QWidget:
         w = QWidget()
         lay = QVBoxLayout(w)
+        lay.setContentsMargins(4, 12, 4, 4)
+        lay.setSpacing(12)
 
-        lay.addWidget(QLabel("Мои вокалоиды:"))
+        frame, flay = _group("Мои вокалоиды")
         self.voice_list = QListWidget()
         self._refresh_voices()
-        lay.addWidget(self.voice_list)
-
+        flay.addWidget(self.voice_list)
         row = QHBoxLayout()
-        listen = QPushButton("▶ Эталон")
+        listen = QPushButton("▶  Эталон")
         listen.clicked.connect(self._voice_listen)
         row.addWidget(listen)
-        sing = QPushButton("🎤 Спеть вокал трека этим голосом")
+        sing = QPushButton("🎤  Спеть вокал трека этим голосом",
+                           objectName="primary")
         sing.clicked.connect(self._voice_sing)
         row.addWidget(sing)
         row.addStretch()
-        lay.addLayout(row)
+        flay.addLayout(row)
+        lay.addWidget(frame, stretch=1)
 
-        lay.addWidget(QLabel("Новый вокалоид — опишите голос словами:"))
+        newf, nlay = _group("Новый вокалоид — опишите голос словами")
         self.voice_name = QLineEdit(placeholderText="Имя (например: Микуру)")
-        lay.addWidget(self.voice_name)
+        nlay.addWidget(self.voice_name)
         self.voice_prompt = QPlainTextEdit(placeholderText=(
             "Промпт: «высокий синтетический голос девочки-робота, "
             "звонкий, слегка металлический…»"))
-        self.voice_prompt.setMaximumHeight(70)
-        lay.addWidget(self.voice_prompt)
+        self.voice_prompt.setMaximumHeight(64)
+        nlay.addWidget(self.voice_prompt)
         row2 = QHBoxLayout()
         self.voice_lang = QComboBox()
         self.voice_lang.addItems(["Русский", "English"])
         row2.addWidget(self.voice_lang)
-        create = QPushButton("Создать голос")
+        create = QPushButton("Создать голос", objectName="primary")
         create.clicked.connect(self._voice_create)
         row2.addWidget(create)
         row2.addStretch()
-        lay.addLayout(row2)
+        nlay.addLayout(row2)
+        lay.addWidget(newf)
+        return w
+
+    def _export_tab(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(4, 12, 4, 4)
+        lay.setSpacing(12)
+
+        frame, flay = _group("Проект Ableton Live")
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Темп, BPM", objectName="dim"))
+        self.bpm_spin = QDoubleSpinBox(minimum=40, maximum=300,
+                                       singleStep=0.5, value=120)
+        row.addWidget(self.bpm_spin)
+        row.addStretch()
+        flay.addLayout(row)
+        row2 = QHBoxLayout()
+        open_btn = QPushButton("Экспорт и открыть в Ableton",
+                               objectName="primary")
+        open_btn.clicked.connect(lambda: self._export(open_live=True))
+        row2.addWidget(open_btn)
+        btn = QPushButton("Только экспорт в папку…")
+        btn.clicked.connect(lambda: self._export(open_live=False))
+        row2.addWidget(btn)
+        row2.addStretch()
+        flay.addLayout(row2)
+        flay.addWidget(QLabel(
+            "Собирается .als: аудиодорожки со стемами, "
+            "MIDI-дорожки с нотами, темп проекта.", objectName="dim"))
+        lay.addWidget(frame)
+        lay.addStretch()
         return w
 
     # ------------------------------------------------------------ голоса
@@ -302,32 +567,33 @@ class MainWindow(QMainWindow):
                 self.log.appendPlainText(f"Готово: {result}")
 
         self.thread.done.connect(finished)
-        self.tabs.setCurrentIndex(0)   # лог на первой вкладке
+        self.tabs.setCurrentIndex(0)   # журнал на первой вкладке
         self.thread.start()
 
-    def _export_tab(self) -> QWidget:
-        w = QWidget()
-        lay = QVBoxLayout(w)
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Темп, BPM:"))
-        self.bpm_spin = QDoubleSpinBox(minimum=40, maximum=300,
-                                       singleStep=0.5, value=120)
-        row.addWidget(self.bpm_spin)
-        self.open_check = QPushButton("Экспорт и открыть в Ableton")
-        self.open_check.clicked.connect(lambda: self._export(open_live=True))
-        row.addWidget(self.open_check)
-        btn = QPushButton("Только экспорт в папку…")
-        btn.clicked.connect(lambda: self._export(open_live=False))
-        row.addWidget(btn)
-        row.addStretch()
-        lay.addLayout(row)
-        lay.addWidget(QLabel(
-            "Собирается .als: аудиодорожки со стемами, MIDI-дорожки "
-            "с нотами, темп проекта."))
-        lay.addStretch()
-        return w
-
     # ------------------------------------------------------------ логика
+
+    def _stem_chips(self):
+        while self.stem_bar.count() > 1:
+            item = self.stem_bar.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        if not self.project:
+            return
+        for i, t in enumerate(self.project.tracks):
+            color = STEM_COLORS.get(t.stem, "#8098bb")
+            b = QPushButton(
+                f"{STEM_TITLES.get(t.stem, t.stem)} · {len(t.notes)}")
+            b.setStyleSheet(
+                f"QPushButton {{ background: rgba(255,255,255,0.05);"
+                f" border-left: 3px solid {color}; border-radius: 8px;"
+                f" padding: 6px 12px; }}"
+                f"QPushButton:hover {{ background: rgba(255,255,255,0.10); }}")
+            b.clicked.connect(lambda _=False, idx=i: self._goto_track(idx))
+            self.stem_bar.insertWidget(self.stem_bar.count() - 1, b)
+
+    def _goto_track(self, i: int):
+        self.track_combo.setCurrentIndex(i)
+        self.tabs.setCurrentIndex(1)
 
     def _load_source(self, src: str):
         if self.thread and self.thread.isRunning():
@@ -348,6 +614,7 @@ class MainWindow(QMainWindow):
         for t in project.tracks:
             self.track_combo.addItem(
                 f"{STEM_TITLES.get(t.stem, t.stem)} ({len(t.notes)} нот)")
+        self._stem_chips()
         self.log.appendPlainText(
             f"Готово: {len(project.tracks)} дорожек. Откройте «Пиано-ролл».")
         self.tabs.setCurrentIndex(1)
@@ -404,7 +671,8 @@ class MainWindow(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
-    app.setStyleSheet(STYLE)
+    app.setStyleSheet(make_style())
+    app.setWindowIcon(QIcon(gradient_pixmap(256)))
     win = MainWindow()
     win.show()
     sys.exit(app.exec())
