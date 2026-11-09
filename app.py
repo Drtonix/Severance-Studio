@@ -12,11 +12,13 @@ from PySide6.QtCore import Qt, QThread, QUrl, Signal
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QFileDialog, QHBoxLayout, QLabel,
-    QMainWindow, QPlainTextEdit, QPushButton, QScrollArea, QSpinBox,
-    QDoubleSpinBox, QTabWidget, QVBoxLayout, QWidget,
+    QLineEdit, QListWidget, QMainWindow, QPlainTextEdit, QPushButton,
+    QScrollArea, QSpinBox, QDoubleSpinBox, QTabWidget, QVBoxLayout,
+    QWidget,
 )
 
 import engine
+import voices as voice_lab
 from engine import Project, Track
 from pianoroll import PianoRoll
 
@@ -67,6 +69,32 @@ class PipelineThread(QThread):
                 project.tracks.append(Track(stem=stem, audio=wav, notes=notes))
             self.done.emit(project)
         except Exception as e:  # noqa: BLE001 — показать в логе любой сбой
+            self.progress.emit(f"Ошибка: {e}")
+            self.done.emit(None)
+
+
+class VoiceThread(QThread):
+    """Фон: создание голоса по промпту или конверсия вокала."""
+    progress = Signal(str)
+    done = Signal(object)
+
+    def __init__(self, mode: str, **kw):
+        super().__init__()
+        self.mode, self.kw = mode, kw
+
+    def run(self):
+        try:
+            if self.mode == "design":
+                v = voice_lab.design_voice(
+                    self.kw["name"], self.kw["prompt"], self.kw["lang"],
+                    progress=self.progress.emit)
+                self.done.emit(v)
+            else:
+                out = voice_lab.convert_voice(
+                    self.kw["source"], self.kw["voice"], self.kw["out"],
+                    progress=self.progress.emit)
+                self.done.emit(out)
+        except Exception as e:  # noqa: BLE001
             self.progress.emit(f"Ошибка: {e}")
             self.done.emit(None)
 
@@ -180,11 +208,102 @@ class MainWindow(QMainWindow):
     def _voices_tab(self) -> QWidget:
         w = QWidget()
         lay = QVBoxLayout(w)
-        lay.addWidget(QLabel(
-            "Голосовая лаборатория — этап 4.\n"
-            "Промпт → свой вокалоид → пение на мелодию трека (RU/EN).\n"
-            "Библиотека голосов: добавление в пару кликов."))
+
+        lay.addWidget(QLabel("Мои вокалоиды:"))
+        self.voice_list = QListWidget()
+        self._refresh_voices()
+        lay.addWidget(self.voice_list)
+
+        row = QHBoxLayout()
+        listen = QPushButton("▶ Эталон")
+        listen.clicked.connect(self._voice_listen)
+        row.addWidget(listen)
+        sing = QPushButton("🎤 Спеть вокал трека этим голосом")
+        sing.clicked.connect(self._voice_sing)
+        row.addWidget(sing)
+        row.addStretch()
+        lay.addLayout(row)
+
+        lay.addWidget(QLabel("Новый вокалоид — опишите голос словами:"))
+        self.voice_name = QLineEdit(placeholderText="Имя (например: Микуру)")
+        lay.addWidget(self.voice_name)
+        self.voice_prompt = QPlainTextEdit(placeholderText=(
+            "Промпт: «высокий синтетический голос девочки-робота, "
+            "звонкий, слегка металлический…»"))
+        self.voice_prompt.setMaximumHeight(70)
+        lay.addWidget(self.voice_prompt)
+        row2 = QHBoxLayout()
+        self.voice_lang = QComboBox()
+        self.voice_lang.addItems(["Русский", "English"])
+        row2.addWidget(self.voice_lang)
+        create = QPushButton("Создать голос")
+        create.clicked.connect(self._voice_create)
+        row2.addWidget(create)
+        row2.addStretch()
+        lay.addLayout(row2)
         return w
+
+    # ------------------------------------------------------------ голоса
+
+    def _refresh_voices(self):
+        self.voice_list.clear()
+        for v in voice_lab.list_voices():
+            self.voice_list.addItem(f"{v.name} — {v.prompt[:50]}…")
+
+    def _selected_voice(self):
+        i = self.voice_list.currentRow()
+        vs = voice_lab.list_voices()
+        return vs[i] if 0 <= i < len(vs) else None
+
+    def _voice_listen(self):
+        v = self._selected_voice()
+        if v:
+            ref = max(v.refs, key=lambda p: p.stat().st_size)
+            self.player.setSource(QUrl.fromLocalFile(str(ref)))
+            self.player.play()
+
+    def _voice_create(self):
+        name = self.voice_name.text().strip()
+        prompt = self.voice_prompt.toPlainText().strip()
+        if not name or not prompt:
+            self.log.appendPlainText("Введите имя и промпт голоса.")
+            return
+        lang = "ru" if self.voice_lang.currentIndex() == 0 else "en"
+        self._run_voice_thread("design", name=name, prompt=prompt, lang=lang)
+
+    def _voice_sing(self):
+        v = self._selected_voice()
+        if not v:
+            self.log.appendPlainText("Выберите голос в списке.")
+            return
+        if not self.project:
+            self.log.appendPlainText("Сначала загрузите трек.")
+            return
+        vocal = next((t for t in self.project.tracks if t.stem == "vocals"),
+                     None)
+        if not vocal or not vocal.audio:
+            self.log.appendPlainText("В проекте нет дорожки vocals.")
+            return
+        out = vocal.audio.with_name(
+            f"{vocal.audio.stem} — {v.name}.wav")
+        self._run_voice_thread("convert", source=vocal.audio, voice=v, out=out)
+
+    def _run_voice_thread(self, mode: str, **kw):
+        if self.thread and self.thread.isRunning():
+            return
+        self.thread = VoiceThread(mode, **kw)
+        self.thread.progress.connect(self.log.appendPlainText)
+
+        def finished(result):
+            if mode == "design" and result:
+                self._refresh_voices()
+                self.log.appendPlainText(f"Голос «{result.name}» создан.")
+            elif result:
+                self.log.appendPlainText(f"Готово: {result}")
+
+        self.thread.done.connect(finished)
+        self.tabs.setCurrentIndex(0)   # лог на первой вкладке
+        self.thread.start()
 
     def _export_tab(self) -> QWidget:
         w = QWidget()
