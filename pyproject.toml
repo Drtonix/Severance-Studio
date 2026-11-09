@@ -1,0 +1,23 @@
+[project]
+name = "severance-studio"
+version = "0.1.0"
+description = "Стемы, пиано-роллы и голоса по промпту — рабочая станция-компаньон для Ableton Live"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "pyside6>=6.11",
+    "mlx-audio-separator>=0.1.20",
+    "demucs-mlx>=1.6",
+    "beat-this>=1.1",
+    "lv-chordia @ git+https://github.com/openmirlab/lv-chordia.git",
+    "mlx-whisper>=0.4.3",
+    "pyworld>=0.3.5",
+    "basic-pitch[coreml]>=0.4.0",
+    "pretty-midi>=0.2.10",
+    "mido>=1.3",
+    "soundfile>=0.13",
+    "yt-dlp",
+    "lameenc>=1.8",
+]
+
+[tool.uv]
+package = false
