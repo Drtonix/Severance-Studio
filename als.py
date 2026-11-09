@@ -183,6 +183,11 @@ def _clone_track(skeleton: str, name: str, color: int,
 
 def build_xml(project: Project, stem_files: dict[str, Path], bpm: float) -> str:
     tpl = _load_template()
+    # счётчик Id выше максимального в шаблоне — иначе наши дорожки
+    # пересекаются с PointeeId мастер-дорожки (PointeeId used 2 times)
+    max_id = max((int(m) for m in re.findall(r'\sId="(\d+)"', tpl)),
+                 default=1000)
+    _id[0] = max_id + 1000
     midi_skel = _skeleton(tpl, "MidiTrack")
     audio_skel = _skeleton(tpl, "AudioTrack")
 
@@ -211,9 +216,15 @@ def build_xml(project: Project, stem_files: dict[str, Path], bpm: float) -> str:
     end = tpl.find("\t\t</Tracks>") + len("\t\t</Tracks>")
     xml = tpl[:start] + "\t\t<Tracks>\n" + "\n".join(tracks + returns) + \
         "\n\t\t</Tracks>" + tpl[end:]
-    # темп проекта
+    # темп проекта: ручное значение + автоматизация (конверт темпа
+    # перекрывает ручное значение, заменяем оба)
     xml = re.sub(r'(<Tempo>\s*<LomId Value="0" />\s*<Manual Value=")[^"]*(")',
                  rf'\g<1>{bpm:.2f}\g<2>', xml, count=1)
+    xml = re.sub(r'(<FloatEvent Id="0" Time="-63072000" Value=")[^"]*(")',
+                 rf'\g<1>{bpm:.2f}\g<2>', xml)
+    # NextPointeeId выше всех выданных Id — Live иначе считает сет битым
+    xml = re.sub(r'(<NextPointeeId Value=")\d+(")',
+                 rf'\g<1>{_id[0] + 100}\g<2>', xml)
     return xml
 
 
