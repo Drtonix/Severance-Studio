@@ -66,12 +66,14 @@ def transcribe(stem_audio: Path, progress=None) -> list[Note]:
 
     _, midi_data, _ = predict(str(stem_audio))
     notes = [
-        Note(start=n.start_time_s,
-             duration=n.end_time_s - n.start_time_s,
-             pitch=n.pitch_midi,
-             velocity=int(n.amplitude * 127))
-        for n in midi_data.instruments[0].notes
+        Note(start=n.start,
+             duration=n.end - n.start,
+             pitch=n.pitch,
+             velocity=n.velocity)
+        for inst in midi_data.instruments
+        for n in inst.notes
     ]
+    notes.sort(key=lambda n: n.start)
     return notes
 
 
