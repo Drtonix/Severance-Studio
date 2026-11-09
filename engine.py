@@ -112,16 +112,62 @@ def to_midi(track: Track, out: Path, bpm: float) -> Path:
     return out
 
 
+# ---------------------------------------------------------------- BPM
+
+def detect_bpm(wav: Path, progress=None) -> float:
+    """Темп через beat-this. Сбой модели → 120 как безопасный дефолт."""
+    try:
+        from beat_this.inference import File2Beats
+
+        f2b = File2Beats()
+        beats, _ = f2b(str(wav))
+        import numpy as np
+
+        intervals = np.diff(beats)
+        if len(intervals) < 4:
+            return 120.0
+        bpm = 60.0 / float(np.median(intervals))
+        while bpm < 70:
+            bpm *= 2
+        while bpm > 180:
+            bpm /= 2
+        return round(bpm, 1)
+    except Exception:  # noqa: BLE001 — темп не критичен, есть дефолт
+        return 120.0
+
+
 # ---------------------------------------------------------------- Ableton
 
-def export_live(project: Project, out_dir: Path, progress=None) -> Path:
-    """Стемы + MIDI + темп-карта → .als (gzip+XML). Этап 3.
-    Пока: экспорт папки со стемами и .mid — Ableton принимает drag-and-drop."""
-    out_dir.mkdir(parents=True, exist_ok=True)
+def export_live(project: Project, out_dir: Path, progress=None,
+                open_live: bool = False) -> Path:
+    """Стемы + MIDI + готовый .als с расставленными дорожками и темпом."""
+    import shutil
+
+    from als import write_als
+
+    bpm = project.bpm or 120.0
+    stems_dir = out_dir / "stems"
+    midi_dir = out_dir / "midi"
+    stems_dir.mkdir(parents=True, exist_ok=True)
+    midi_dir.mkdir(parents=True, exist_ok=True)
+
+    stem_files: dict[str, Path] = {}
     for track in project.tracks:
+        if track.audio and track.audio.exists():
+            dst = stems_dir / track.audio.name
+            if track.audio.resolve() != dst.resolve():
+                shutil.copy2(track.audio, dst)
+            stem_files[track.stem] = dst
         if track.notes:
-            to_midi(track, out_dir / f"{track.stem}.mid", project.bpm)
-    return out_dir
+            to_midi(track, midi_dir / f"{track.stem}.mid", bpm)
+
+    als_path = write_als(project, out_dir / f"{project.name}.als",
+                         stem_files, bpm)
+    if open_live:
+        import subprocess
+
+        subprocess.Popen(["open", str(als_path)])
+    return als_path
 
 
 # ---------------------------------------------------------------- превью

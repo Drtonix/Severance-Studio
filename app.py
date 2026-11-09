@@ -57,7 +57,10 @@ class PipelineThread(QThread):
         try:
             self.progress.emit("Разбор на дорожки (demucs-mlx)…")
             stem_files = engine.stems(self.src, self.work / "stems")
-            project = Project(name=self.src.stem, source=self.src)
+            self.progress.emit("Определение темпа (beat-this)…")
+            bpm = engine.detect_bpm(next(iter(stem_files.values())))
+            project = Project(name=self.src.stem, source=self.src, bpm=bpm)
+            self.progress.emit(f"Темп: {bpm} BPM")
             for stem, wav in stem_files.items():
                 self.progress.emit(f"Ноты: {STEM_TITLES.get(stem, stem)}…")
                 notes = engine.transcribe(wav)
@@ -186,9 +189,22 @@ class MainWindow(QMainWindow):
     def _export_tab(self) -> QWidget:
         w = QWidget()
         lay = QVBoxLayout(w)
-        btn = QPushButton("Экспортировать стемы + MIDI для Ableton…")
-        btn.clicked.connect(self._export)
-        lay.addWidget(btn)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Темп, BPM:"))
+        self.bpm_spin = QDoubleSpinBox(minimum=40, maximum=300,
+                                       singleStep=0.5, value=120)
+        row.addWidget(self.bpm_spin)
+        self.open_check = QPushButton("Экспорт и открыть в Ableton")
+        self.open_check.clicked.connect(lambda: self._export(open_live=True))
+        row.addWidget(self.open_check)
+        btn = QPushButton("Только экспорт в папку…")
+        btn.clicked.connect(lambda: self._export(open_live=False))
+        row.addWidget(btn)
+        row.addStretch()
+        lay.addLayout(row)
+        lay.addWidget(QLabel(
+            "Собирается .als: аудиодорожки со стемами, MIDI-дорожки "
+            "с нотами, темп проекта."))
         lay.addStretch()
         return w
 
@@ -208,6 +224,7 @@ class MainWindow(QMainWindow):
         if not project:
             return
         self.project = project
+        self._pipeline_bpm(project)
         self.track_combo.clear()
         for t in project.tracks:
             self.track_combo.addItem(
@@ -248,15 +265,22 @@ class MainWindow(QMainWindow):
         self.player.stop()
         self.roll.set_playhead(-1)
 
-    def _export(self):
+    def _export(self, open_live: bool = False):
         if not self.project:
             self.log.appendPlainText("Сначала загрузите трек.")
             return
+        self.project.bpm = self.bpm_spin.value()
         folder = QFileDialog.getExistingDirectory(self, "Куда экспортировать")
         if folder:
-            out = engine.export_live(self.project, Path(folder)
-                                     / f"{self.project.name} — Severance Studio")
-            self.log.appendPlainText(f"Экспортировано в {out}")
+            als = engine.export_live(
+                self.project,
+                Path(folder) / f"{self.project.name} — Severance Studio",
+                open_live=open_live)
+            self.log.appendPlainText(f"Проект Ableton: {als}")
+
+    def _pipeline_bpm(self, project: Project):
+        if project.bpm:
+            self.bpm_spin.setValue(project.bpm)
 
 
 def main():
