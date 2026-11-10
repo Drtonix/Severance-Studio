@@ -20,6 +20,8 @@ import onnxruntime as ort
 import soundfile as sf
 import yaml
 
+from g2p_gts import GTS_MAP, GTS_VOWELS, map_phones
+
 SAMPLE_RATE = 44100
 HOP = 512
 FRAME_SEC = HOP / SAMPLE_RATE
@@ -220,6 +222,10 @@ class DiffSingerBank:
         self.hidden = cfg.get("hidden_size", 384)
         self.main_dir = self.root / cfg["acoustic"].rsplit("/", 1)[0] if "/" in cfg["acoustic"] else self.root
         self.main_phonemes = _load_ids(self.root / cfg["phonemes"])
+        # авто-определение фонемного набора: банк на GTSinger-фонемах?
+        self.gts_phonemes = ("a_ru" in self.main_phonemes
+                             and "ru/a" not in self.main_phonemes)
+        self.vowels = GTS_VOWELS if self.gts_phonemes else RU_VOWELS
         self.lang_ids = _load_ids(self.root / cfg["languages"]) if cfg.get("use_lang_id") else {}
         self.acoustic = _sess(self.root / cfg["acoustic"])
         # спикер эмбеддинг акустики
@@ -386,13 +392,16 @@ class DiffSingerBank:
                 for p in ph:
                     if p in RU_VOWELS:
                         last_vowel = p
+        if self.gts_phonemes:
+            syll_phones = [map_phones(ph) for ph in syll_phones]
+            last_vowel = GTS_MAP.get(last_vowel, last_vowel)
         # 2. группы: [SP+нач.согласные], по группе на ноту, граница в конце
         groups: list[list[str]] = []
         g_midis: list[int] = []
         g_dur_frames: list[int] = []
         first = syll_phones[0]
-        pre = [p for p in first if p not in RU_VOWELS]
-        first_vi = next((i for i, p in enumerate(first) if p in RU_VOWELS), len(first))
+        pre = [p for p in first if p not in self.vowels]
+        first_vi = next((i for i, p in enumerate(first) if p in self.vowels), len(first))
         groups.append(["SP"] + first[:first_vi])
         g_midis.append(notes[0].pitch)
         # длительность группы 0: 500 мс паддинг
